@@ -2,36 +2,41 @@ import pandas as pd
 from datetime import date
 from datetime import datetime
 import numpy as np
+from scipy.optimize import curve_fit
+from scipy.interpolate import interp1d
+import matplotlib.pyplot as plt
 
 # Load raw mask data & intervention data & county-level election data
-df = pd.read_csv("masks/mask-prevalence.csv", index_col=0)
-df = pd.melt(df, id_vars=['State'], value_vars=['2020-04-21', '2020-05-23'])
-df = df.rename(columns={'variable': 'date', 'value': 'percent_wearing_masks'})
+masks = pd.read_csv("masks/mask-prevalence.csv", index_col='State')
+# df = pd.melt(df, id_vars=['State'], value_vars=['2020-04-21', '2020-05-23'])
+# df = df.rename(columns={'variable': 'date', 'value': 'percent_wearing_masks'})
+ipsos = pd.read_csv("masks/ipsos_mask_data.csv", index_col='State')
+del ipsos['Unnamed: 0']
+masks['2020-06-22'] = ipsos.sort_values(by='State')['2020-06-22'].tolist()
+del masks['Unnamed: 0']
+print(masks)
 interventions = pd.read_csv("masks/interventions.csv").groupby('STATE').mean(numeric_only=True).round().fillna('737500')
 counties = pd.read_csv('masks/2016_US_County_Level_Presidential_Results.csv')
 
-# Manipulate counties and calculations
+# Manipulate counties and partisan calculations
 counties = counties[['state_abbr', 'combined_fips', 'votes_dem', 'votes_gop']]
 counties['per_dem'] = counties['votes_dem'] / (counties['votes_dem'] + counties['votes_gop'])
 counties['per_gop'] = counties['votes_gop'] / (counties['votes_dem'] + counties['votes_gop'])
-counties['partisan_masks'] = counties['per_gop'] * (0.74 * 0.6 + (1 - 0.74) * 0.1) + counties['per_dem'] * (0.92 * 0.9 + (1 - 0.92) * 0.3)
+counties['partisan_masks'] = 100 * (counties['per_gop'] * (0.74 * 0.6 + (1 - 0.74) * 0.1) + counties['per_dem'] * (0.92 * 0.9 + (1 - 0.92) * 0.3))
 del counties['votes_dem']
 del counties['votes_gop']
 del counties['per_dem']
 del counties['per_gop']
-# print(counties.groupby('state_abbr').mean())
 states = pd.read_csv("masks/mask-prevalence.csv", index_col='State')
-# counties[datetime(2020, 5, 23)] = counties.apply(lambda row: row[datetime(2020, 5, 23)] * 0.5 + 0.5 * states.loc[row['state_abbr'], '2020-05-23'] / 100, axis=1)
-print(counties)
 
 
 # Group by State and insert interpolated data between the two raw dates (d1 and d2)
-df['date'] = pd.to_datetime(df['date'])
-df.index = df['date']
-del df['date']
-states = df.groupby('State')
-df = states.resample('D').mean()
-df['percent_wearing_masks'] = df['percent_wearing_masks'].interpolate()
+# df['date'] = pd.to_datetime(df['date'])
+# df.index = df['date']
+# del df['date']
+# states = df.groupby('State')
+# df = states.resample('D').mean()
+# df['percent_wearing_masks'] = df['percent_wearing_masks'].interpolate()
 
 
 def calculate_linear_equation(x1, y1, x2, y2, x):
@@ -41,85 +46,86 @@ def calculate_linear_equation(x1, y1, x2, y2, x):
     return y0
 
 
+def sigmoid(x, L, x0, k, b):
+    y = L / (1 + np.exp(-k*(x-x0)))+b
+    return (y)
+
+
 # For each state, extrapolate data
-def generate_state_data(s):
-    state_name = s.index.values[0][0]
+def generate_county_data(s):
+    state_name = s.iloc[0]['state_abbr']
+    partisan_masks = s.iloc[0]['partisan_masks']
+    print(s.iloc[0])
+
     # Retrieve the date of the first Gathering Restriction date
+    d00 = date.toordinal(datetime(2020, 2, 5))
     d0 = int(interventions['>50 gatherings'].loc[state_name])
 
     # Calculate mask prevalence on d0 using y = md + b
     d1 = date.toordinal(datetime(2020, 4, 21))  # first poll
     d2 = date.toordinal(datetime(2020, 5, 23))  # second poll
-    y1 = s.iloc[0]
-    y2 = s.iloc[-1]
-    prediction = calculate_linear_equation(d1, y1, d2, y2, d0)
+    y1 = midpoint(masks.loc[state_name, '2020-04-21'], partisan_masks)
+    y2 = midpoint(masks.loc[state_name, '2020-05-23'], partisan_masks)
 
-    first_restriction = date.fromordinal(d0)
-    first_restriction_dates = pd.date_range(first_restriction, '2020-04-20')
-    first_restriction_df = pd.DataFrame(index=first_restriction_dates, columns=['percent_wearing_masks'])
-    first_restriction_df.loc[first_restriction] = prediction
-    first_restriction_df['State'] = state_name
-    first_restriction_df = first_restriction_df.set_index(['State', first_restriction_dates])
-    first_restriction_df.index = first_restriction_df.index.rename(['State', 'date'])
+    x = [d00, d0, d1, d2]
+    y = [1, 5, y1, y2]
+    p0 = [60, np.median(x), 0.2, 0.99]
+    popt, _ = curve_fit(sigmoid, x, y, p0, bounds=([40, d0, 0.15, 0.9], [100, d1, np.inf, 1]), method='dogbox')
 
-    # Extrapolate from d1 to today
-    today = date.today()
-    most_recent_dates = pd.date_range(datetime(2020, 5, 23), today)
-    most_recent_df = pd.DataFrame(index=most_recent_dates, columns=['percent_wearing_masks'])
-    most_recent_df.loc[today] = calculate_linear_equation(d1, y1, d2, y2, date.toordinal(today))
-    most_recent_df['State'] = state_name
-    most_recent_df = most_recent_df.set_index(['State', most_recent_dates])
-    most_recent_df.index = most_recent_df.index.rename(['State', 'date'])
+    sigmoid_ordinals = range(d00, d2)
+    sigmoid_df = pd.DataFrame({'date': sigmoid_ordinals})
+    sigmoid_df['per_masks'] = 0.0
+    for row in sigmoid_df.index:
+        sigmoid_df['per_masks'][row] = sigmoid(sigmoid_df['date'][row], *popt)
 
-    # Interpolate from d0 to today
-    state_df = pd.concat([first_restriction_df, s, most_recent_df])
-    state_df = state_df.reset_index(level='date')
-    state_df['percent_wearing_masks'] = state_df['percent_wearing_masks'].astype('float64').interpolate()
+    # Linear fit for later dates
+    x = [d2, date.toordinal(datetime(2020, 6, 22))]
+    y = [y2, midpoint(masks.loc[state_name, '2020-06-22'], partisan_masks)]
+    f = interp1d(x, y, fill_value="extrapolate")
 
-    # Augment mask prevalence from first historical date to first Gathering Restriction
-    # as linear from 1% to 5%
-    first_historical_date = datetime(2020, 2, 5)
-    pre_restriction_dates = pd.date_range(first_historical_date, date.fromordinal(d0-1))
-    pre_restriction_df = pd.DataFrame(index=pre_restriction_dates, columns=['percent_wearing_masks'])
-    pre_restriction_df.loc[first_historical_date] = 1.0
-    pre_restriction_df.loc[date.fromordinal(d0-1)] = 5.0
-    pre_restriction_df['State'] = state_name
-    pre_restriction_df = pre_restriction_df.set_index(['State', pre_restriction_dates])
-    pre_restriction_df.index = pre_restriction_df.index.rename(['State', 'date'])
-    pre_restriction_df['percent_wearing_masks'] = pre_restriction_df['percent_wearing_masks'].astype('float64').interpolate()
-    pre_restriction_df.reset_index(level='date', inplace=True)
+    linear_ordinals = range(d2+1, date.toordinal(date.today()))
+    linear_df = pd.DataFrame({'date': linear_ordinals})
+    linear_df['per_masks'] = 0.0
+    for row in linear_df.index:
+        linear_df['per_masks'][row] = f(linear_df['date'][row])
 
-    state_df = pd.concat([pre_restriction_df, state_df])
+    county_df = pd.concat([sigmoid_df, linear_df])
+    county_df.reset_index()
+    for row in county_df.index:
+        county_df.iloc[row]['date'] = date.fromordinal(int(county_df.iloc[row]['date']))
 
-    state_df['percent_wearing_masks'] = state_df['percent_wearing_masks'] * 0.01
-    state_df['reduction_from_baseline'] = state_df['percent_wearing_masks'] * 0.46
-
-    all_states[state_name] = state_df
+    county_df['fips'] = s.iloc[0]['combined_fips']
+    county_df['state'] = state_name
+    county_dfs.append(county_df)
 
 
-def generate_county_data(c):
-
-    # Get values from dataframe
-    state = c.iloc[0, 0]
-    fips = c.iloc[0, 1]
-    partisan_masks = c.iloc[0, 2]
-
-    # Convert state dataframe to county dataframe
-    df = all_states[state]
-    df = df.reset_index()
-    df.insert(1, 'fips', fips)
-    first_restriction_date = date.fromordinal(int(interventions['>50 gatherings'].loc[state]))
-    df['percent_wearing_masks'] = df.apply(lambda row: row['percent_wearing_masks'] * 0.5 + 0.5 * partisan_masks if row['date'] >= first_restriction_date else row['percent_wearing_masks'], axis=1)
-
-    # Update mask efficacy calculation
-    df['reduction_from_baseline'] = df['percent_wearing_masks'] * 0.46
-
-    county_dfs.append(df)
+def midpoint(x1, x2):
+    return (x1 + x2) * 0.5
 
 
-all_states = dict()
+# def generate_county_data(c):
+#     # Get values from dataframe
+#     print(c)
+#     state = c.iloc[0, 0]
+#     fips = c.iloc[0, 1]
+#     partisan_masks = c.iloc[0, 2]
+
+#     # Convert state dataframe to county dataframe
+#     df = all_states[state]
+#     df = df.reset_index()
+#     df.insert(1, 'fips', fips)
+#     print(df)
+#     first_restriction_date = date.fromordinal(int(interventions['>50 gatherings'].loc[state]))
+#     df['percent_wearing_masks'] = df.apply(lambda row: row['percent_wearing_masks'] * 0.5 + 0.5 * partisan_masks if row['date'] >= first_restriction_date else row['percent_wearing_masks'], axis=1)
+
+#     # Update mask efficacy calculation
+#     df['reduction_from_baseline'] = df['percent_wearing_masks'] * 0.46
+
+#     county_dfs.append(df)
+
+
 county_dfs = []
-df.groupby('State').apply(generate_state_data)
+# df.groupby('State').apply(generate_state_data)
 counties.groupby('combined_fips').apply(generate_county_data)
 all_counties_df = pd.concat(county_dfs)
 print(all_counties_df)
