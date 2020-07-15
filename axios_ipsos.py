@@ -61,16 +61,16 @@ us_state_abbrev = {
 
 
 def calc_mask_score(s):
+    # print(s)
     always = int(s.iloc[0][:-1])
     sometimes = int(s.iloc[1][:-1])
     occasionally = int(s.iloc[2][:-1])
-    # never = int(s.iloc[3][:-1])
-    return round(always * 1 + sometimes * 0.6 + occasionally * 0.3, 1)
+    never = int(s.iloc[3][:-1])
+    return round(always * 1 + sometimes * 0.75 + occasionally * 0.4, 1)
 
 
 df = pd.read_csv('/Users/kjjin/TheBridge/covid/masks/AxiosIpsos_masks_states.txt', sep='\t', header=0)
-regions = df.groupby('GEO ').agg({'May 8-June 22': calc_mask_score})
-regions = regions.rename({'GEO ': 'State', 'May 8-June 22': '2020-06-22'})
+regions = df.groupby('GEO ').agg({'Apr 10-May 4': calc_mask_score, 'May 8-June 22': calc_mask_score})
 
 for state in ['Alaska', 'Washington', 'Hawaii']:
     regions.loc[state] = regions.loc['Pacific']
@@ -98,5 +98,14 @@ for index in index_list:
     if index in us_state_abbrev:
         new_indices.append(us_state_abbrev[index])
 states['State'] = new_indices
+states = states.sort_values(by=['State'])
 
+print(states)
 states.to_csv("masks/ipsos_mask_data.csv")
+
+# Calculate the difference between axios/ipsos and covidstates surveys
+masks = pd.read_csv("masks/mask-prevalence-v3.csv", index_col='State')
+ipsos = pd.read_csv("masks/ipsos_mask_data.csv", index_col='State')
+del ipsos['Unnamed: 0']
+masks['2020-06-22'] = ipsos.sort_values(by='State')['2020-06-22'].tolist()
+print(sum(abs(masks['2020-04-21'].to_numpy() - states['Apr 10-May 4'].to_numpy())))
